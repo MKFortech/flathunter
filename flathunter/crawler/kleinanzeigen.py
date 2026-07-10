@@ -21,6 +21,7 @@ class Kleinanzeigen(WebdriverCrawler):
         "accept": "application/json",
         "Content-Type": "application/json",
     }
+    API_USE_DETAIL_ENDPOINT = False
     MONTHS = {
         "Januar": "01",
         "Februar": "02",
@@ -115,18 +116,11 @@ class Kleinanzeigen(WebdriverCrawler):
         entries = []
         for result in results:
             try:
-                details = self._load_api_details(result)
-                entries.append(self._map_api_entry(result, details))
-            except requests.exceptions.RequestException as error:
-                logger.warning(
-                    "Kleinanzeigen detail API request failed for result %s: %s. Using summary data.",
-                    result.get("adid") or result.get("id") or result.get("url"),
-                    error,
-                )
-                try:
+                if self.API_USE_DETAIL_ENDPOINT:
+                    details = self._load_api_details(result)
+                    entries.append(self._map_api_entry(result, details))
+                else:
                     entries.append(self._map_api_entry(result, {}))
-                except (TypeError, ValueError) as fallback_error:
-                    logger.warning("Skipping malformed Kleinanzeigen API result after detail failure: %s", fallback_error)
             except (TypeError, ValueError) as error:
                 logger.warning("Skipping malformed Kleinanzeigen API result: %s", error)
 
@@ -265,7 +259,7 @@ class Kleinanzeigen(WebdriverCrawler):
             'price': self._format_price(details.get('price'), summary.get('price')),
             'size': size,
             'rooms': rooms,
-            'address': self._format_location(location),
+            'address': self._format_location(location) or summary.get('url', ''),
             'crawler': self.get_name(),
             'from': self._extract_available_from(detail_values),
         }
