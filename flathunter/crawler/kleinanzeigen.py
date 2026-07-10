@@ -123,10 +123,27 @@ class Kleinanzeigen(WebdriverCrawler):
         if "success" in payload and not payload.get("success"):
             raise ValueError("Hosted Kleinanzeigen /inserate fallback returned an unsuccessful response")
 
-        results = payload.get("data")
-        if isinstance(results, list):
-            return results
-        raise ValueError("Hosted Kleinanzeigen /inserate fallback did not return a result list")
+        # Different API versions expose listings under different keys.
+        for key in ("data", "results", "items"):
+            results = payload.get(key)
+            if isinstance(results, list):
+                return results
+
+        # Some variants nest the listing array one level deeper.
+        nested_data = payload.get("data")
+        if isinstance(nested_data, dict):
+            for key in ("results", "items", "data"):
+                results = nested_data.get(key)
+                if isinstance(results, list):
+                    return results
+
+        preview = str(payload)
+        if len(preview) > 300:
+            preview = preview[:300] + "..."
+        raise ValueError(
+            "Hosted Kleinanzeigen /inserate fallback did not return a result list. "
+            f"Payload preview: {preview}"
+        )
 
     @staticmethod
     def _build_legacy_search_params(search_url, max_pages=None):
