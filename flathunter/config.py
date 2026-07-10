@@ -55,6 +55,8 @@ class Env:
     FLATHUNTER_CAPMONSTER_KEY = _read_env("FLATHUNTER_CAPMONSTER_KEY")
     FLATHUNTER_HEADLESS_BROWSER = _read_env("FLATHUNTER_HEADLESS_BROWSER")
     FLATHUNTER_IS24_COOKIE = _read_env("FLATHUNTER_IS24_COOKIE")
+    FLATHUNTER_KLEINANZEIGEN_API_URL = _read_env("FLATHUNTER_KLEINANZEIGEN_API_URL")
+    FLATHUNTER_KLEINANZEIGEN_API_ENABLED = _read_env("FLATHUNTER_KLEINANZEIGEN_API_ENABLED")
 
     # Generic Config
     FLATHUNTER_TARGET_URLS = _read_env("FLATHUNTER_TARGET_URLS")
@@ -401,6 +403,14 @@ Preis: {price}
         """Return the precalculated immoscout cookie"""
         return self._read_yaml_path('immoscout_cookie', None)
 
+    def kleinanzeigen_api_enabled(self) -> bool:
+        """Return true if Kleinanzeigen crawling should use the hosted API first"""
+        return _to_bool(self._read_yaml_path('kleinanzeigen.api.enabled', True))
+
+    def kleinanzeigen_api_base_url(self) -> str:
+        """Return the base URL for the hosted Kleinanzeigen API"""
+        return self._read_yaml_path('kleinanzeigen.api.base_url', 'https://kleinanzeigen.mari09.de')
+
     def __repr__(self):
         return json.dumps({
             "captcha_enabled": self.captcha_enabled(),
@@ -519,6 +529,15 @@ class Config(CaptchaEnvironmentConfig):  # pylint: disable=too-many-public-metho
 
     def website_domain(self):
         return Env.FLATHUNTER_WEBSITE_DOMAIN() or super().website_domain()
+
+    def kleinanzeigen_api_enabled(self) -> bool:
+        env_enabled = Env.FLATHUNTER_KLEINANZEIGEN_API_ENABLED()
+        if env_enabled is not None:
+            return _to_bool(env_enabled)
+        return super().kleinanzeigen_api_enabled()
+
+    def kleinanzeigen_api_base_url(self) -> str:
+        return Env.FLATHUNTER_KLEINANZEIGEN_API_URL() or super().kleinanzeigen_api_base_url()
 
     def website_bot_name(self):
         return Env.FLATHUNTER_WEBSITE_BOT_NAME() or super().website_bot_name()
