@@ -23,13 +23,16 @@ class AddressResolver(Processor):
 
     def process_expose(self, expose):
         """Fetches the expose from the expose URL and extracts the address"""
-        if expose['address'].startswith('http'):
-            url = expose['address']
+        address = expose.get('address') if isinstance(expose, dict) else None
+        if isinstance(address, str) and address.startswith('http'):
+            url = address
             for searcher in self.config.searchers():
                 if re.search(searcher.URL_PATTERN, url):
                     expose['address'] = searcher.load_address(url)
                     logger.debug("Loaded address %s for url %s", expose['address'], url)
                     break
+        elif isinstance(expose, dict) and 'address' not in expose:
+            expose['address'] = ""
         return expose
 
 class CrawlExposeDetails(Processor):
@@ -40,8 +43,13 @@ class CrawlExposeDetails(Processor):
 
     def process_expose(self, expose):
         """Fetches the page at exposes['url'] and extracts additional details from it"""
+        if not isinstance(expose, dict):
+            return expose
+        url = expose.get('url')
+        if not isinstance(url, str) or not url:
+            return expose
         for searcher in self.config.searchers():
-            if re.search(searcher.URL_PATTERN, expose['url']):
+            if re.search(searcher.URL_PATTERN, url):
                 expose = searcher.get_expose_details(expose)
         return expose
 
