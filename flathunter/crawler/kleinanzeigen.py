@@ -14,7 +14,11 @@ class Kleinanzeigen(WebdriverCrawler):
     """Implementation of Crawler interface for Kleinanzeigen"""
 
     URL_PATTERN = re.compile(r'https://www\.kleinanzeigen\.de')
-    API_REQUEST_TIMEOUT = 60
+    API_REQUEST_TIMEOUT = 30
+    API_HEADERS = {
+        "accept": "application/json",
+        "Content-Type": "application/json",
+    }
     MONTHS = {
         "Januar": "01",
         "Februar": "02",
@@ -52,6 +56,7 @@ class Kleinanzeigen(WebdriverCrawler):
         base_url = self.config.kleinanzeigen_api_base_url().rstrip("/")
         response = requests.post(
             f"{base_url}/inserate-by-url",
+            headers=self.API_HEADERS,
             json={
                 "url": search_url,
                 "max_pages": max_pages or 1,
