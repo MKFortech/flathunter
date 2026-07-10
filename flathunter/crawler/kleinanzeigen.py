@@ -1,7 +1,7 @@
 """Expose crawler for Kleinanzeigen"""
 import re
 import datetime
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlparse, parse_qs, unquote
 
 import requests
 
@@ -59,7 +59,7 @@ class Kleinanzeigen(WebdriverCrawler):
     def _get_results_from_api(self, search_url, max_pages=None):
         """Fetch search results from the hosted Kleinanzeigen API"""
         base_url = self.config.kleinanzeigen_api_base_url().rstrip("/")
-        payload = {
+        request_body = {
             "url": search_url,
             "max_pages": max_pages or 1,
         }
@@ -68,7 +68,7 @@ class Kleinanzeigen(WebdriverCrawler):
             response = requests.post(
                 f"{base_url}/inserate-by-url",
                 headers=self.API_HEADERS,
-                json=payload,
+                json=request_body,
                 timeout=self._api_timeout(),
             )
         except requests.exceptions.ReadTimeout:
@@ -76,24 +76,103 @@ class Kleinanzeigen(WebdriverCrawler):
                 "Hosted Kleinanzeigen API timed out for %s on first attempt. Retrying once.",
                 search_url,
             )
-            response = requests.post(
-                f"{base_url}/inserate-by-url",
-                headers=self.API_HEADERS,
-                json=payload,
-                timeout=self._api_timeout(),
-            )
-        response.raise_for_status()
-        payload = response.json()
-        if not payload.get("success"):
-            raise ValueError("Hosted Kleinanzeigen API returned an unsuccessful response")
+            try:
+                response = requests.post(
+                    f"{base_url}/inserate-by-url",
+                    headers=self.API_HEADERS,
+                    json=request_body,
+                    timeout=self._api_timeout(),
+                )
+                response.raise_for_status()
+                payload = response.json()
+                if not payload.get("success"):
+                    raise ValueError("Hosted Kleinanzeigen API returned an unsuccessful response")
+                results = payload.get("results", [])
+            except requests.exceptions.ReadTimeout:
+                logger.warning(
+                    "Hosted Kleinanzeigen API timed out again for %s. Falling back to /inserate.",
+                    search_url,
+                )
+                results = self._get_results_from_legacy_api(search_url, max_pages)
+        else:
+            response.raise_for_status()
+            payload = response.json()
+            if not payload.get("success"):
+                raise ValueError("Hosted Kleinanzeigen API returned an unsuccessful response")
+            results = payload.get("results", [])
 
         entries = []
-        for result in payload.get("results", []):
+        for result in results:
             details = self._load_api_details(result)
             entries.append(self._map_api_entry(result, details))
 
         logger.debug('Number of entries found via hosted API: %d', len(entries))
         return entries
+
+    def _get_results_from_legacy_api(self, search_url, max_pages=None):
+        """Fallback to legacy /inserate endpoint when /inserate-by-url times out"""
+        base_url = self.config.kleinanzeigen_api_base_url().rstrip("/")
+        response = requests.get(
+            f"{base_url}/inserate",
+            params=self._build_legacy_search_params(search_url, max_pages),
+            headers={"accept": "application/json"},
+            timeout=self._api_timeout(),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if "success" in payload and not payload.get("success"):
+            raise ValueError("Hosted Kleinanzeigen /inserate fallback returned an unsuccessful response")
+
+        results = payload.get("data")
+        if isinstance(results, list):
+            return results
+        raise ValueError("Hosted Kleinanzeigen /inserate fallback did not return a result list")
+
+    @staticmethod
+    def _build_legacy_search_params(search_url, max_pages=None):
+        """Map a Kleinanzeigen search URL to /inserate query parameters"""
+        parsed = urlparse(search_url)
+        query = parse_qs(parsed.query)
+        segments = [segment for segment in unquote(parsed.path).strip("/").split("/") if segment]
+
+        params = {
+            "page_count": max_pages or 1,
+        }
+
+        if query.get("keywords"):
+            params["query"] = query["keywords"][0]
+        if query.get("locationStr"):
+            params["location"] = query["locationStr"][0]
+        if query.get("radius"):
+            try:
+                params["radius"] = int(query["radius"][0])
+            except ValueError:
+                pass
+
+        for segment in segments:
+            if not segment.startswith("preis:"):
+                continue
+            parts = segment.split(":")
+            if len(parts) >= 3:
+                if parts[1]:
+                    params["min_price"] = int(parts[1])
+                if parts[2]:
+                    params["max_price"] = int(parts[2])
+
+        if "location" not in params and len(segments) > 1 and ":" not in segments[1]:
+            params["location"] = segments[1]
+
+        if "query" not in params:
+            for idx, segment in enumerate(segments):
+                if not re.match(r"^k?\d*c\d+", segment):
+                    continue
+                if idx > 0:
+                    candidate = segments[idx - 1]
+                    if ":" not in candidate and not candidate.startswith("s-"):
+                        params["query"] = candidate
+                break
+
+        return params
 
     def _load_api_details(self, result):
         """Fetch structured listing details for a single hosted API result"""
