@@ -1,6 +1,7 @@
 """Expose crawler for Kleinanzeigen"""
 import re
 import datetime
+import hashlib
 from urllib.parse import urlsplit, urlparse, parse_qs, unquote
 
 import requests
@@ -103,8 +104,11 @@ class Kleinanzeigen(WebdriverCrawler):
 
         entries = []
         for result in results:
-            details = self._load_api_details(result)
-            entries.append(self._map_api_entry(result, details))
+            try:
+                details = self._load_api_details(result)
+                entries.append(self._map_api_entry(result, details))
+            except (TypeError, ValueError) as error:
+                logger.warning("Skipping malformed Kleinanzeigen API result: %s", error)
 
         logger.debug('Number of entries found via hosted API: %d', len(entries))
         return entries
@@ -215,7 +219,7 @@ class Kleinanzeigen(WebdriverCrawler):
         image_urls = (((details.get("media") or {}).get("images") or {}).get("urls") or [])
         location = details.get("location") or {}
         detail_values = details.get("details") or {}
-        entry_id = details.get("id") or summary.get("adid")
+        entry_id = self._derive_entry_id(summary, details)
 
         return {
             'id': int(entry_id),
@@ -229,6 +233,21 @@ class Kleinanzeigen(WebdriverCrawler):
             'crawler': self.get_name(),
             'from': self._extract_available_from(detail_values),
         }
+
+    @staticmethod
+    def _derive_entry_id(summary, details):
+        """Derive a stable numeric expose id from API payload variants"""
+        entry_id = details.get("id") or summary.get("adid") or summary.get("id")
+        if entry_id is not None and str(entry_id).strip():
+            entry_id_str = str(entry_id).strip()
+            if entry_id_str.isdigit():
+                return int(entry_id_str)
+
+        fallback_source = details.get("url_redirected") or summary.get("url") or details.get("title") or summary.get("title")
+        if not fallback_source:
+            raise ValueError("Kleinanzeigen API result has no usable id or fallback source")
+        digest = hashlib.sha256(str(fallback_source).encode("utf-8")).hexdigest()
+        return int(digest, 16) % (10**16)
 
     @staticmethod
     def _extract_listing_id(url):
