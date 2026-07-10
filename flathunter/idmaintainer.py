@@ -3,6 +3,7 @@ import threading
 import sqlite3 as lite
 import datetime
 import json
+import hashlib
 
 from flathunter.logging import logger
 from flathunter.abstract_processor import Processor
@@ -22,6 +23,9 @@ class SaveAllExposesProcessor(Processor):
 
     def process_expose(self, expose):
         """Save a single expose"""
+        if not isinstance(expose, dict):
+            logger.warning("Skipping non-dict expose in SaveAllExposesProcessor: %s", type(expose))
+            return expose
         self.id_watch.save_expose(expose)
         return expose
 
@@ -69,12 +73,30 @@ class IdMaintainer:
 
     def save_expose(self, expose):
         """Saves an expose to a database"""
+        expose_id = self._get_or_derive_expose_id(expose)
+        crawler = str(expose.get('crawler', 'UnknownCrawler'))
         cur = self.get_connection().cursor()
         cur.execute('INSERT OR REPLACE INTO exposes(id, created, crawler, details) \
                      VALUES (?, ?, ?, ?)',
-                    (int(expose['id']), datetime.datetime.now(),
-                     expose['crawler'], json.dumps(expose)))
+                    (expose_id, datetime.datetime.now(),
+                     crawler, json.dumps(expose)))
         self.get_connection().commit()
+
+    @staticmethod
+    def _get_or_derive_expose_id(expose):
+        """Return a stable numeric expose id, deriving one if missing."""
+        raw_id = expose.get('id')
+        if raw_id is not None and str(raw_id).strip():
+            raw_id_str = str(raw_id).strip()
+            if raw_id_str.isdigit():
+                return int(raw_id_str)
+
+        fallback = expose.get('url') or expose.get('title') or json.dumps(expose, sort_keys=True)
+        digest = hashlib.sha256(str(fallback).encode('utf-8')).hexdigest()
+        derived_id = int(digest, 16) % (10**16)
+        expose['id'] = derived_id
+        logger.warning("Expose had no usable id. Derived fallback id %d", derived_id)
+        return derived_id
 
     def get_exposes_since(self, min_datetime):
         """Loads all exposes since the specified date"""
