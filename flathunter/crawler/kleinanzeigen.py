@@ -14,7 +14,8 @@ class Kleinanzeigen(WebdriverCrawler):
     """Implementation of Crawler interface for Kleinanzeigen"""
 
     URL_PATTERN = re.compile(r'https://www\.kleinanzeigen\.de')
-    API_REQUEST_TIMEOUT = 30
+    API_CONNECT_TIMEOUT = 10
+    API_READ_TIMEOUT = 120
     API_HEADERS = {
         "accept": "application/json",
         "Content-Type": "application/json",
@@ -51,18 +52,36 @@ class Kleinanzeigen(WebdriverCrawler):
                 )
         return super().get_results(search_url, max_pages)
 
+    def _api_timeout(self):
+        """Use fast connect timeout while allowing slower scrape responses"""
+        return (self.API_CONNECT_TIMEOUT, self.API_READ_TIMEOUT)
+
     def _get_results_from_api(self, search_url, max_pages=None):
         """Fetch search results from the hosted Kleinanzeigen API"""
         base_url = self.config.kleinanzeigen_api_base_url().rstrip("/")
-        response = requests.post(
-            f"{base_url}/inserate-by-url",
-            headers=self.API_HEADERS,
-            json={
-                "url": search_url,
-                "max_pages": max_pages or 1,
-            },
-            timeout=self.API_REQUEST_TIMEOUT,
-        )
+        payload = {
+            "url": search_url,
+            "max_pages": max_pages or 1,
+        }
+
+        try:
+            response = requests.post(
+                f"{base_url}/inserate-by-url",
+                headers=self.API_HEADERS,
+                json=payload,
+                timeout=self._api_timeout(),
+            )
+        except requests.exceptions.ReadTimeout:
+            logger.warning(
+                "Hosted Kleinanzeigen API timed out for %s on first attempt. Retrying once.",
+                search_url,
+            )
+            response = requests.post(
+                f"{base_url}/inserate-by-url",
+                headers=self.API_HEADERS,
+                json=payload,
+                timeout=self._api_timeout(),
+            )
         response.raise_for_status()
         payload = response.json()
         if not payload.get("success"):
@@ -87,7 +106,7 @@ class Kleinanzeigen(WebdriverCrawler):
         response = requests.get(
             f"{base_url}/inserat/{listing_id}",
             params={"batch_id": f"flathunter-{result.get('adid', listing_id)}"},
-            timeout=self.API_REQUEST_TIMEOUT,
+            timeout=self._api_timeout(),
         )
         response.raise_for_status()
         payload = response.json()
