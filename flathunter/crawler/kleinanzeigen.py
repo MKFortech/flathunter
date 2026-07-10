@@ -16,7 +16,7 @@ class Kleinanzeigen(WebdriverCrawler):
 
     URL_PATTERN = re.compile(r'https://www\.kleinanzeigen\.de')
     API_CONNECT_TIMEOUT = 10
-    API_READ_TIMEOUT = 120
+    API_READ_TIMEOUT = 20
     API_HEADERS = {
         "accept": "application/json",
         "Content-Type": "application/json",
@@ -65,18 +65,9 @@ class Kleinanzeigen(WebdriverCrawler):
             "max_pages": max_pages or 1,
         }
 
-        try:
-            response = requests.post(
-                f"{base_url}/inserate-by-url",
-                headers=self.API_HEADERS,
-                json=request_body,
-                timeout=self._api_timeout(),
-            )
-        except requests.exceptions.ReadTimeout:
-            logger.warning(
-                "Hosted Kleinanzeigen API timed out for %s on first attempt. Retrying once.",
-                search_url,
-            )
+        results = None
+        post_error = None
+        for attempt in (1, 2):
             try:
                 response = requests.post(
                     f"{base_url}/inserate-by-url",
@@ -86,21 +77,40 @@ class Kleinanzeigen(WebdriverCrawler):
                 )
                 response.raise_for_status()
                 payload = response.json()
-                if not payload.get("success"):
+                if "success" in payload and not payload.get("success"):
                     raise ValueError("Hosted Kleinanzeigen API returned an unsuccessful response")
-                results = payload.get("results", [])
-            except requests.exceptions.ReadTimeout:
+                results = self._extract_result_list(payload, endpoint="/inserate-by-url")
+                break
+            except requests.exceptions.ReadTimeout as error:
+                post_error = error
+                if attempt == 1:
+                    logger.warning(
+                        "Hosted Kleinanzeigen API timed out for %s on first attempt. Retrying once.",
+                        search_url,
+                    )
+                    continue
                 logger.warning(
                     "Hosted Kleinanzeigen API timed out again for %s. Falling back to /inserate.",
                     search_url,
                 )
-                results = self._get_results_from_legacy_api(search_url, max_pages)
-        else:
-            response.raise_for_status()
-            payload = response.json()
-            if not payload.get("success"):
-                raise ValueError("Hosted Kleinanzeigen API returned an unsuccessful response")
-            results = payload.get("results", [])
+            except (requests.exceptions.RequestException, ValueError) as error:
+                post_error = error
+                logger.warning(
+                    "Hosted Kleinanzeigen API POST path failed for %s on attempt %d: %s",
+                    search_url,
+                    attempt,
+                    error,
+                )
+                if attempt == 1:
+                    continue
+
+        if results is None:
+            logger.warning(
+                "Falling back to /inserate for %s after POST failures: %s",
+                search_url,
+                post_error,
+            )
+            results = self._get_results_from_legacy_api(search_url, max_pages)
 
         entries = []
         for result in results:
@@ -112,6 +122,29 @@ class Kleinanzeigen(WebdriverCrawler):
 
         logger.debug('Number of entries found via hosted API: %d', len(entries))
         return entries
+
+    @staticmethod
+    def _extract_result_list(payload, endpoint):
+        """Extract listing arrays from different API response schemas"""
+        for key in ("results", "data", "items"):
+            results = payload.get(key)
+            if isinstance(results, list):
+                return results
+
+        nested_data = payload.get("data")
+        if isinstance(nested_data, dict):
+            for key in ("results", "items", "data"):
+                results = nested_data.get(key)
+                if isinstance(results, list):
+                    return results
+
+        preview = str(payload)
+        if len(preview) > 300:
+            preview = preview[:300] + "..."
+        raise ValueError(
+            f"Hosted Kleinanzeigen API {endpoint} did not return a result list. "
+            f"Payload preview: {preview}"
+        )
 
     def _get_results_from_legacy_api(self, search_url, max_pages=None):
         """Fallback to legacy /inserate endpoint when /inserate-by-url times out"""
@@ -126,28 +159,7 @@ class Kleinanzeigen(WebdriverCrawler):
         payload = response.json()
         if "success" in payload and not payload.get("success"):
             raise ValueError("Hosted Kleinanzeigen /inserate fallback returned an unsuccessful response")
-
-        # Different API versions expose listings under different keys.
-        for key in ("data", "results", "items"):
-            results = payload.get(key)
-            if isinstance(results, list):
-                return results
-
-        # Some variants nest the listing array one level deeper.
-        nested_data = payload.get("data")
-        if isinstance(nested_data, dict):
-            for key in ("results", "items", "data"):
-                results = nested_data.get(key)
-                if isinstance(results, list):
-                    return results
-
-        preview = str(payload)
-        if len(preview) > 300:
-            preview = preview[:300] + "..."
-        raise ValueError(
-            "Hosted Kleinanzeigen /inserate fallback did not return a result list. "
-            f"Payload preview: {preview}"
-        )
+        return self._extract_result_list(payload, endpoint="/inserate")
 
     @staticmethod
     def _build_legacy_search_params(search_url, max_pages=None):
@@ -220,6 +232,17 @@ class Kleinanzeigen(WebdriverCrawler):
         location = details.get("location") or {}
         detail_values = details.get("details") or {}
         entry_id = self._derive_entry_id(summary, details)
+        fallback_text = " ".join(
+            str(part).strip()
+            for part in (summary.get("title"), summary.get("description"), details.get("title"))
+            if part
+        )
+        size = self._lookup_detail_value(detail_values, ('wohnfl', 'flache', 'fläche'))
+        rooms = self._lookup_detail_value(detail_values, ('zimmer', 'raeume', 'raume', 'räume'))
+        if not size:
+            size = self._extract_size_from_text(fallback_text)
+        if not rooms:
+            rooms = self._extract_rooms_from_text(fallback_text)
 
         return {
             'id': int(entry_id),
@@ -227,8 +250,8 @@ class Kleinanzeigen(WebdriverCrawler):
             'url': details.get('url_redirected') or summary.get('url', ''),
             'title': details.get('title') or summary.get('title', ''),
             'price': self._format_price(details.get('price'), summary.get('price')),
-            'size': self._lookup_detail_value(detail_values, ('wohnfl', 'flache', 'fläche')),
-            'rooms': self._lookup_detail_value(detail_values, ('zimmer', 'raeume', 'räume')),
+            'size': size,
+            'rooms': rooms,
             'address': self._format_location(location),
             'crawler': self.get_name(),
             'from': self._extract_available_from(detail_values),
@@ -280,6 +303,26 @@ class Kleinanzeigen(WebdriverCrawler):
             if any(fragment in normalized_key for fragment in fragments):
                 return str(value).strip()
         return ''
+
+    @staticmethod
+    def _extract_size_from_text(text):
+        """Extract apartment size from free text fallback"""
+        if not text:
+            return ''
+        match = re.search(r'(\d{1,3}(?:[\.,]\d{1,2})?)\s*m²', text, flags=re.IGNORECASE)
+        if match is None:
+            return ''
+        return f"{match.group(1)} m²"
+
+    @staticmethod
+    def _extract_rooms_from_text(text):
+        """Extract room count from free text fallback"""
+        if not text:
+            return ''
+        match = re.search(r'(\d{1,2}(?:[\.,]\d{1,2})?)\s*(?:Zimmer|Zi\.)', text, flags=re.IGNORECASE)
+        if match is None:
+            return ''
+        return match.group(1)
 
     @staticmethod
     def _format_location(location):
