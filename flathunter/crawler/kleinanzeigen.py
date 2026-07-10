@@ -117,6 +117,16 @@ class Kleinanzeigen(WebdriverCrawler):
             try:
                 details = self._load_api_details(result)
                 entries.append(self._map_api_entry(result, details))
+            except requests.exceptions.RequestException as error:
+                logger.warning(
+                    "Kleinanzeigen detail API request failed for result %s: %s. Using summary data.",
+                    result.get("adid") or result.get("id") or result.get("url"),
+                    error,
+                )
+                try:
+                    entries.append(self._map_api_entry(result, {}))
+                except (TypeError, ValueError) as fallback_error:
+                    logger.warning("Skipping malformed Kleinanzeigen API result after detail failure: %s", fallback_error)
             except (TypeError, ValueError) as error:
                 logger.warning("Skipping malformed Kleinanzeigen API result: %s", error)
 
@@ -215,16 +225,19 @@ class Kleinanzeigen(WebdriverCrawler):
             return {}
 
         base_url = self.config.kleinanzeigen_api_base_url().rstrip("/")
-        response = requests.get(
-            f"{base_url}/inserat/{listing_id}",
-            params={"batch_id": f"flathunter-{result.get('adid', listing_id)}"},
-            timeout=self._api_timeout(),
-        )
-        response.raise_for_status()
-        payload = response.json()
-        if not payload.get("success"):
-            raise ValueError(f"Hosted Kleinanzeigen detail API failed for listing {listing_id}")
-        return payload.get("data", {})
+        try:
+            response = requests.get(
+                f"{base_url}/inserat/{listing_id}",
+                params={"batch_id": f"flathunter-{result.get('adid', listing_id)}"},
+                timeout=self._api_timeout(),
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if not payload.get("success"):
+                raise ValueError(f"Hosted Kleinanzeigen detail API failed for listing {listing_id}")
+            return payload.get("data", {})
+        except requests.exceptions.RequestException:
+            raise
 
     def _map_api_entry(self, summary, details):
         """Convert hosted API payloads to Flathunter expose format"""
